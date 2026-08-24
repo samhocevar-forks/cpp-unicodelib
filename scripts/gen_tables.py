@@ -1,5 +1,6 @@
 import sys
 import re
+import itertools
 
 #------------------------------------------------------------------------------
 # Constants
@@ -804,11 +805,65 @@ def genNomalizationCompositionTable(ucd):
             else:
                 exclusions.add(first)
 
-    print("inline const std::unordered_map<std::u32string, char32_t> _normalization_composition = {")
-    for cp, codes in items():
-        if not cp in exclusions:
-            print('{ U"\\U%08X\\U%08X", 0x%08X },' % (codes[0], codes[1], cp))
+    data = [(codes[0], codes[1], cp) for cp, codes in items() if not cp in exclusions]
+
+    # These are good values for a simple hash function, taken from the MurmurHash
+    # finalizer step to create an avalanche effect on bits.
+    M0, M1, M2, S1, S2 = 0xcc9e2d51, 0x85ebca6b, 0xc2b2ae35, 16, 13
+
+    # Compute a hash key from two codepoints and check that it is unique, then
+    # try to arrange all these keys into buckets of average size 8. We brute
+    # force one parameter (the seed) to get a reasonably good spread.
+    def make_key(a, b):
+        return ((a * M0) ^ b) & 0xffffffff
+    keys = [make_key(a, b) for a, b, _ in data]
+    assert len(set(keys)) == len(data)
+
+    target_size = 8
+    bucket_bits = (len(data) // target_size).bit_length()
+    bucket_count = 2 ** bucket_bits
+
+    def make_bucket(x, seed):
+        n = x ^ seed
+        n = ((n ^ (n >> S1)) * M1) & 0xffffffff
+        n = ((n ^ (n >> S2)) * M2) & 0xffffffff
+        return n >> (32 - bucket_bits)
+
+    best_max_size, best_seed = len(data), 0
+    for seed in range(10000):
+        bucket_sizes = [0] * bucket_count
+        for key in keys:
+            n = make_bucket(key, seed)
+            bucket_sizes[n] += 1
+            if bucket_sizes[n] > best_max_size:
+                break
+        max_size = max(bucket_sizes)
+        if max_size < best_max_size:
+            best_max_size, best_seed = max_size, seed
+
+    # Create the final buckets, sorted by code[0] then code[1]
+    buckets = [[] for _ in range(bucket_count)]
+    for a, b, c in sorted(data):
+        n = make_bucket(make_key(a, b), best_seed)
+        buckets[n].append((a, b, c))
+
+    print("inline const char32_t _normalization_composition[][3] {")
+    for e in itertools.chain(*buckets):
+        print("{ U'\\U%08x', U'\\U%08x', U'\\U%08x' }," % e)
     print("};")
+
+    print("inline const uint32_t _normalization_composition_offsets[] {")
+    print("0,", ", ".join(map(str, itertools.accumulate(map(len, buckets)))))
+    print("};")
+
+    print(f"""inline uint32_t _normalization_composition_bucket(char32_t cp0, char32_t cp1) {{
+  uint32_t n = (uint32_t(cp0) * {M0}) ^ uint32_t(cp1) ^ {best_seed};
+  n = (n ^ (n >> {S1})) * {M1};
+  n = (n ^ (n >> {S2})) * {M2};
+  return n >> (32 - {bucket_bits});
+}}
+""")
+    sys.exit(0)
 
 #------------------------------------------------------------------------------
 # genGraphemeBreakPropertyTable
@@ -975,16 +1030,16 @@ if (len(sys.argv) < 2):
 else:
     ucd = sys.argv[1]
 
-    genGeneralCategoryPropertyTable(ucd)
-    genPropertyTable(ucd)
-    genDerivedCorePropertyTable(ucd)
-    genSimpleCaseMappingTable(ucd)
-    genSpecialCaseMappingTable(ucd)
-    genCaseFoldingTable(ucd)
-    genBlockPropertyTable(ucd)
-    genScriptPropertyTable(ucd)
-    genScriptExtensionTable(ucd)
-    genNomalizationPropertyTable(ucd)
+    #genGeneralCategoryPropertyTable(ucd)
+    #genPropertyTable(ucd)
+    #genDerivedCorePropertyTable(ucd)
+    #genSimpleCaseMappingTable(ucd)
+    #genSpecialCaseMappingTable(ucd)
+    #genCaseFoldingTable(ucd)
+    #genBlockPropertyTable(ucd)
+    #genScriptPropertyTable(ucd)
+    #genScriptExtensionTable(ucd)
+    #genNomalizationPropertyTable(ucd)
     genNomalizationCompositionTable(ucd)
     genGraphemeBreakPropertyTable(ucd)
     genWordBreakPropertyTable(ucd)
